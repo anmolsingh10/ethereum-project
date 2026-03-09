@@ -1,9 +1,5 @@
-import asyncio
 from manager.nft_collection_manager import NFTCollectionManager
 from repository.collection_repository import CollectionRepository
-
-# Spark already exists in Serverless
-# DO NOT recreate unless needed
 
 ALCHEMY_KEY = dbutils.secrets.get(
     scope="nft-scope",
@@ -20,7 +16,11 @@ collections = {
 
 repo.create_collections(collections)
 
+# Step 1: Fetch base NFTs
 manager.fetch_base("collection_1")
 
-# safer than await
+# Step 2: Fetch metadata
 await manager.fetch_metadata("collection_1")
+
+# Step 3: Run uniqueness algorithm (no printing)
+manager.calculate_uniqueness()

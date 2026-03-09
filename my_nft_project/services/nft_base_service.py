@@ -2,6 +2,7 @@ import requests
 import time
 from pyspark.sql.types import StructType, StructField, StringType
 
+
 class NFTBaseService:
 
     def __init__(self, spark, alchemy_key):
@@ -13,7 +14,7 @@ class NFTBaseService:
     # -----------------------------------
     # Fetch NFT Base (With Metadata)
     # -----------------------------------
-    def fetch_nft_base(self, contract_address: str, collection_name: str):
+    def fetch_nft_base(self, collection_id: str, contract_address: str, collection_name: str):
 
         url = f"{self.base_url}/getNFTsForContract"
         rows = []
@@ -22,7 +23,7 @@ class NFTBaseService:
         while True:
             params = {
                 "contractAddress": contract_address,
-                "withMetadata": "true"   # 🔥 Fetch name, description, image
+                "withMetadata": "true"
             }
 
             if page_key:
@@ -41,15 +42,39 @@ class NFTBaseService:
                 break
 
             for nft in nfts:
-                metadata = nft.get("metadata") or {}  # Ensure dict even if None
+
+                metadata = nft.get("metadata") or {}
+                raw_metadata = nft.get("raw", {}).get("metadata", {})
+
+                name = (
+                    metadata.get("name")
+                    or raw_metadata.get("name")
+                    or nft.get("title")
+                    or ""
+                )
+
+                description = (
+                    metadata.get("description")
+                    or raw_metadata.get("description")
+                    or nft.get("description")
+                    or ""
+                )
+
+                image_url = (
+                    metadata.get("image")
+                    or raw_metadata.get("image")
+                    or nft.get("image", {}).get("cachedUrl")
+                    or ""
+                )
 
                 rows.append({
+                    "collection_id": collection_id,   # ✅ added
                     "collection_name": collection_name,
                     "contract_address": contract_address,
-                    "token_id": str(nft.get("tokenId") or ""),  # Convert to string
-                    "name": metadata.get("name") or "",         # Default empty string
-                    "description": metadata.get("description") or "",
-                    "image_url": metadata.get("image") or ""
+                    "token_id": str(nft.get("tokenId") or ""),
+                    "name": name,
+                    "description": description,
+                    "image_url": image_url
                 })
 
             page_key = data.get("pageKey")
@@ -62,6 +87,7 @@ class NFTBaseService:
         # Explicit schema
         # -------------------------
         schema = StructType([
+            StructField("collection_id", StringType(), True),   # ✅ added
             StructField("collection_name", StringType(), True),
             StructField("contract_address", StringType(), True),
             StructField("token_id", StringType(), True),
@@ -78,4 +104,5 @@ class NFTBaseService:
             .saveAsTable(self.base_table)
 
         print("Base NFTs with metadata fetched successfully.")
+
         return df
