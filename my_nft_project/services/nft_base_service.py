@@ -11,9 +11,6 @@ class NFTBaseService:
         self.base_url = f"https://eth-mainnet.g.alchemy.com/nft/v3/{alchemy_key}"
         self.base_table = "nft_base_table"
 
-    # -----------------------------------
-    # Fetch NFT Base (With Metadata)
-    # -----------------------------------
     def fetch_nft_base(self, collection_id: str, contract_address: str, collection_name: str):
 
         url = f"{self.base_url}/getNFTsForContract"
@@ -68,7 +65,7 @@ class NFTBaseService:
                 )
 
                 rows.append({
-                    "collection_id": collection_id,   # ✅ added
+                    "collection_id": collection_id,
                     "collection_name": collection_name,
                     "contract_address": contract_address,
                     "token_id": str(nft.get("tokenId") or ""),
@@ -83,11 +80,8 @@ class NFTBaseService:
 
             time.sleep(0.2)
 
-        # -------------------------
-        # Explicit schema
-        # -------------------------
         schema = StructType([
-            StructField("collection_id", StringType(), True),   # ✅ added
+            StructField("collection_id", StringType(), True),
             StructField("collection_name", StringType(), True),
             StructField("contract_address", StringType(), True),
             StructField("token_id", StringType(), True),
@@ -99,10 +93,9 @@ class NFTBaseService:
         df = self.spark.createDataFrame(rows, schema=schema)
 
         df.write \
-            .mode("overwrite") \
-            .option("overwriteSchema", "true") \
+            .mode("append") \
+            .option("mergeSchema", "true") \
             .saveAsTable(self.base_table)
 
-        print("Base NFTs with metadata fetched successfully.")
-
+        print(f"Base NFTs fetched for collection: {collection_name}")
         return df
