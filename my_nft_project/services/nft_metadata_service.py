@@ -1,8 +1,10 @@
 import asyncio
 import aiohttp
 import json
+import time
+import traceback
 from pyspark.sql.functions import col
-from pyspark.sql.types import StructType, StructField, StringType  # ✅ add this
+from pyspark.sql.types import StructType, StructField, StringType
 
 
 class NFTMetadataService:
@@ -13,7 +15,6 @@ class NFTMetadataService:
         self.base_url = f"https://eth-mainnet.g.alchemy.com/nft/v3/{alchemy_key}"
         self.metadata_table = "nft_metadata_table"
 
-    # ✅ Define schema explicitly
     def _get_schema(self):
         return StructType([
             StructField("collection_id",    StringType(), True),
@@ -29,100 +30,121 @@ class NFTMetadataService:
             StructField("trait_value",      StringType(), True),
         ])
 
-    async def _fetch_metadata(
-        self,
-        session,
-        collection_id,
-        collection_name,
-        contract_address,
-        token_id,
-        semaphore
-    ):
-        url = f"{self.base_url}/getNFTMetadata"
-        params = {
-            "contractAddress": contract_address,
-            "tokenId": token_id
-        }
+    async def _fetch_metadata(self, session, row, semaphore):
+        try:
+            token_id = str(row.token_id) if row.token_id else None
+            if token_id is None or row.contract_address is None:
+                return None
 
-        async with semaphore:
-            async with session.get(url, params=params) as response:
+            url    = f"{self.base_url}/getNFTMetadata"
+            params = {
+                "contractAddress": str(row.contract_address),
+                "tokenId":         token_id
+            }
 
-                if response.status != 200:
-                    return None
+            async with semaphore:
+                async with session.get(url, params=params) as response:
+                    if response.status != 200:
+                        return None
 
-                data = await response.json()
-                metadata = data.get("raw", {}).get("metadata", {})
-                attributes = metadata.get("attributes", [])
+                    data       = await response.json()
+                    metadata   = data.get("raw", {}).get("metadata", {})
+                    attributes = metadata.get("attributes", [])
 
-                base_data = {
-                    "collection_id":    str(collection_id)      if collection_id    else None,
-                    "collection_name":  str(collection_name)    if collection_name  else None,
-                    "contract_address": str(contract_address)   if contract_address else None,
-                    "token_id":         str(token_id)           if token_id         else None,
-                    "name":             str(metadata.get("name"))           if metadata.get("name")         else None,
-                    "description":      str(metadata.get("description"))    if metadata.get("description")  else None,
-                    "image_url":        str(metadata.get("image"))          if metadata.get("image")        else None,
-                    "attributes_json":  json.dumps(attributes),
-                    "metadata_json":    json.dumps(metadata)
-                }
+                    base_data = {
+                        "collection_id":    str(row.collection_id)   if row.collection_id   else None,
+                        "collection_name":  str(row.collection_name) if row.collection_name else None,
+                        "contract_address": str(row.contract_address),
+                        "token_id":         token_id,
+                        "name":             str(metadata.get("name"))        if metadata.get("name")        else None,
+                        "description":      str(metadata.get("description")) if metadata.get("description") else None,
+                        "image_url":        str(metadata.get("image"))       if metadata.get("image")       else None,
+                        "attributes_json":  json.dumps(attributes),
+                        "metadata_json":    json.dumps(metadata)
+                    }
 
-                if not attributes:
-                    return [{
-                        **base_data,
-                        "trait_type":  None,
-                        "trait_value": None
-                    }]
+                    if not attributes:
+                        return [{**base_data, "trait_type": None, "trait_value": None}]
 
-                rows = []
-                for attr in attributes:
-                    rows.append({
-                        **base_data,
-                        "trait_type":  str(attr.get("trait_type")) if attr.get("trait_type") else None,
-                        "trait_value": str(attr.get("value"))      if attr.get("value")      else None
-                    })
+                    return [
+                        {
+                            **base_data,
+                            "trait_type":  str(attr.get("trait_type")) if attr.get("trait_type") else None,
+                            "trait_value": str(attr.get("value"))      if attr.get("value")      else None
+                        }
+                        for attr in attributes
+                    ]
 
-                return rows
+        except Exception:
+            traceback.print_exc()
+            return None
 
     async def fetch_all_metadata_async(self, collection_id):
+        try:
+            all_rows = self.spark.table("nft_base_table") \
+                .filter(col("collection_id") == str(collection_id)) \
+                .filter(col("token_id").isNotNull()) \
+                .collect()
 
-        nft_df = self.spark.table("nft_base_table") \
-            .filter(col("collection_id") == collection_id)
+            total_nfts = len(all_rows)
 
-        nft_rows = nft_df.collect()
+            if total_nfts == 0:
+                print("⚠️ No NFTs found for this collection")
+                return
 
-        semaphore = asyncio.Semaphore(20)
+            batch_size      = 100
+            total_processed = 0
 
-        async with aiohttp.ClientSession() as session:
+            for i in range(0, total_nfts, batch_size):
+                batch_rows = all_rows[i: i + batch_size]
 
-            tasks = [
-                self._fetch_metadata(
-                    session,
-                    row.collection_id,
-                    row.collection_name,
-                    row.contract_address,
-                    row.token_id,
-                    semaphore
-                )
-                for row in nft_rows
-            ]
+                semaphore = asyncio.Semaphore(10)
 
-            results = await asyncio.gather(*tasks)
+                async with aiohttp.ClientSession() as session:
+                    tasks = [
+                        self._fetch_metadata(session, row, semaphore)
+                        for row in batch_rows
+                    ]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        metadata_rows = [
-            item
-            for sublist in results if sublist
-            for item in sublist
-        ]
+                metadata_rows = [
+                    item
+                    for sublist in results
+                    if sublist and not isinstance(sublist, Exception)
+                    for item in sublist
+                ]
 
-        # ✅ pass explicit schema — no more type inference errors
-        df = self.spark.createDataFrame(metadata_rows, schema=self._get_schema())
+                if metadata_rows:
+                    # ── Retry createDataFrame ─────────
+                    df = None
+                    for attempt in range(1, 4):
+                        try:
+                            df = self.spark.createDataFrame(
+                                metadata_rows,
+                                schema=self._get_schema()
+                            )
+                            break
+                        except Exception:
+                            if attempt < 3:
+                                time.sleep(30)
+                            else:
+                                raise
 
-        df.write \
-            .partitionBy("collection_id") \
-            .format("delta") \
-            .mode("append") \
-            .option("mergeSchema", "true") \
-            .saveAsTable(self.metadata_table)
+                    if df is None:
+                        continue
 
-        print(f"Metadata fetched for collection_id: {collection_id}")
-        return df
+                    # ✅ simple append — fast
+                    df.write \
+                        .mode("append") \
+                        .option("mergeSchema", "true") \
+                        .partitionBy("collection_id") \
+                        .saveAsTable(self.metadata_table)
+
+                    total_processed += len(metadata_rows)
+
+            print(f"✅ Metadata fetched for collection_id: {collection_id} | Total: {total_processed}")
+
+        except Exception as e:
+            print(f"❌ Error in fetch_all_metadata_async for collection_id: {collection_id}")
+            traceback.print_exc()
+            raise
